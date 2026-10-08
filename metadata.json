@@ -1,0 +1,6 @@
+{
+  "name": "CaféBarista iOS POS & Pedidos",
+  "description": "Sistema de comandas y punto de venta digital para cafeterías estilo iOS. Personalización ágil de cafés, leches, endulzantes, gestión manual del menú y monitor de barista en tiempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
