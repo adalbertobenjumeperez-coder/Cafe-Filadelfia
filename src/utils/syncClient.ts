@@ -6,6 +6,10 @@ export type SyncEventCallback = (event: {
   payload: any;
 }) => void;
 
+// Default Cloud Run backend URL where server.ts runs
+export const DEFAULT_CLOUD_SERVER_URL = 'https://ais-dev-wbmxpspt7xllkujwtmst3z-716059199071.us-west2.run.app';
+const SERVER_URL_KEY = 'cafebarista_server_url';
+
 class SyncClient {
   private ws: WebSocket | null = null;
   private eventSource: EventSource | null = null;
@@ -20,6 +24,51 @@ class SyncClient {
     if (typeof window !== 'undefined') {
       this.initConnection();
     }
+  }
+
+  public getServerBaseUrl(): string {
+    if (typeof window === 'undefined') return '';
+
+    // Check user customized server URL
+    const saved = localStorage.getItem(SERVER_URL_KEY);
+    if (saved && saved.trim()) {
+      return saved.trim().replace(/\/+$/, '');
+    }
+
+    // If running on GitHub Pages (or external static host without backend), default to Cloud Run server
+    if (window.location.hostname.includes('github.io') || window.location.protocol === 'file:') {
+      return DEFAULT_CLOUD_SERVER_URL;
+    }
+
+    // When running on localhost or Cloud Run directly, use same-origin relative URLs
+    return '';
+  }
+
+  public setServerBaseUrl(url: string) {
+    if (typeof window === 'undefined') return;
+    const clean = url.trim().replace(/\/+$/, '');
+    if (clean) {
+      localStorage.setItem(SERVER_URL_KEY, clean);
+    } else {
+      localStorage.removeItem(SERVER_URL_KEY);
+    }
+    this.reconnect();
+  }
+
+  public reconnect() {
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {}
+      this.ws = null;
+    }
+    if (this.eventSource) {
+      try {
+        this.eventSource.close();
+      } catch {}
+      this.eventSource = null;
+    }
+    this.initConnection();
   }
 
   public subscribe(cb: SyncEventCallback) {
@@ -54,84 +103,95 @@ class SyncClient {
   }
 
   public async initConnection() {
-    if (typeof window === 'undefined') return;
+    if (typeof window !== 'undefined') {
+      this.setStatus('conectando');
+      const baseUrl = this.getServerBaseUrl();
 
-    this.setStatus('conectando');
+      // 1. Snapshot fetch via REST
+      try {
+        const res = await fetch(`${baseUrl}/api/state`, {
+          headers: { Accept: 'application/json' },
+        });
 
-    // First fetch current snapshot via REST
-    try {
-      const res = await fetch('/api/state');
-      if (res.ok) {
-        const data = await res.json();
-        this.notify({ type: 'init', payload: data });
-        // Update local cache
-        if (data.products) localSaveProducts(data.products);
-        if (data.orders) localSaveOrders(data.orders);
+        if (res.ok) {
+          const data = await res.json();
+          this.notify({ type: 'init', payload: data });
+          if (data.products) localSaveProducts(data.products);
+          if (data.orders) localSaveOrders(data.orders);
+          this.setStatus('conectado');
+        } else {
+          throw new Error(`Server returned status ${res.status}`);
+        }
+      } catch (err) {
+        console.warn('Initial fetch from backend failed, using local offline cache:', err);
+        this.notify({
+          type: 'init',
+          payload: {
+            products: getStoredProducts(),
+            orders: getStoredOrders(),
+            counter: 100,
+          },
+        });
       }
-    } catch {
-      // Offline fallback: use local storage
-      this.notify({
-        type: 'init',
-        payload: {
-          products: getStoredProducts(),
-          orders: getStoredOrders(),
-          counter: 100,
-        },
-      });
-    }
 
-    // Try WebSocket connection
-    try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-      this.ws = new WebSocket(wsUrl);
-
-      this.ws.onopen = () => {
-        this.setStatus('conectado');
-        if (this.reconnectTimer) {
-          clearTimeout(this.reconnectTimer);
-          this.reconnectTimer = null;
+      // 2. Open real-time WebSocket connection
+      try {
+        let wsUrl: string;
+        if (baseUrl) {
+          const parsed = new URL(baseUrl);
+          const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+          wsUrl = `${wsProtocol}//${parsed.host}/ws`;
+        } else {
+          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          wsUrl = `${protocol}//${window.location.host}/ws`;
         }
 
-        // Keepalive ping
-        this.pingInterval = setInterval(() => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ type: 'ping' }));
+        this.ws = new WebSocket(wsUrl);
+
+        this.ws.onopen = () => {
+          this.setStatus('conectado');
+          if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
           }
-        }, 20000);
-      };
 
-      this.ws.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          if (parsed.type === 'pong') return;
-          this.handleServerEvent(parsed);
-        } catch (err) {
-          console.error('Error parsing WS message:', err);
-        }
-      };
+          if (this.pingInterval) clearInterval(this.pingInterval);
+          this.pingInterval = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(JSON.stringify({ type: 'ping' }));
+            }
+          }, 20000);
+        };
 
-      this.ws.onerror = () => {
-        // Fall back to SSE if WS fails
-        this.setupSSEFallback();
-      };
+        this.ws.onmessage = (event) => {
+          try {
+            const parsed = JSON.parse(event.data);
+            if (parsed.type === 'pong') return;
+            this.handleServerEvent(parsed);
+          } catch (err) {
+            console.error('Error parsing WS message:', err);
+          }
+        };
 
-      this.ws.onclose = () => {
-        this.setStatus('desconectado');
-        if (this.pingInterval) clearInterval(this.pingInterval);
-        this.scheduleReconnect();
-      };
-    } catch {
-      this.setupSSEFallback();
+        this.ws.onerror = () => {
+          this.setupSSEFallback(baseUrl);
+        };
+
+        this.ws.onclose = () => {
+          if (this.pingInterval) clearInterval(this.pingInterval);
+          this.setupSSEFallback(baseUrl);
+        };
+      } catch {
+        this.setupSSEFallback(baseUrl);
+      }
     }
   }
 
-  private setupSSEFallback() {
+  private setupSSEFallback(baseUrl: string) {
     if (this.eventSource) return;
 
     try {
-      this.eventSource = new EventSource('/api/events');
+      this.eventSource = new EventSource(`${baseUrl}/api/events`);
       this.eventSource.onopen = () => {
         this.setStatus('conectado');
       };
@@ -145,9 +205,11 @@ class SyncClient {
       };
       this.eventSource.onerror = () => {
         this.setStatus('desconectado');
+        this.scheduleReconnect();
       };
     } catch {
       this.setStatus('desconectado');
+      this.scheduleReconnect();
     }
   }
 
@@ -166,12 +228,13 @@ class SyncClient {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.initConnection();
-    }, 3000);
+    }, 4000);
   }
 
   // API Methods
   public async createOrder(orderData: Partial<Order>): Promise<Order> {
-    const res = await fetch('/api/orders', {
+    const baseUrl = this.getServerBaseUrl();
+    const res = await fetch(`${baseUrl}/api/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(orderData),
@@ -186,7 +249,8 @@ class SyncClient {
   }
 
   public async updateOrderStatus(orderId: string, status: OrderStatus): Promise<Order> {
-    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/status`, {
+    const baseUrl = this.getServerBaseUrl();
+    const res = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderId)}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
@@ -201,7 +265,8 @@ class SyncClient {
   }
 
   public async saveProducts(products: Product[]): Promise<Product[]> {
-    const res = await fetch('/api/products', {
+    const baseUrl = this.getServerBaseUrl();
+    const res = await fetch(`${baseUrl}/api/products`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ products }),
@@ -216,15 +281,29 @@ class SyncClient {
   }
 
   public async resetMenu(): Promise<void> {
-    await fetch('/api/reset-menu', { method: 'POST' });
+    const baseUrl = this.getServerBaseUrl();
+    await fetch(`${baseUrl}/api/reset-menu`, { method: 'POST' });
   }
 
   public async importBackup(data: { products: Product[]; orders: Order[] }): Promise<void> {
-    await fetch('/api/backup/import', {
+    const baseUrl = this.getServerBaseUrl();
+    await fetch(`${baseUrl}/api/backup/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
+  }
+
+  public async testServerConnection(url: string): Promise<boolean> {
+    try {
+      const clean = url.trim().replace(/\/+$/, '');
+      const res = await fetch(`${clean}/api/state`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 }
 
