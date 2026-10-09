@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, Tablet, Laptop, Check, Copy, Wifi, ArrowRightLeft, Server, AlertTriangle, RefreshCw } from 'lucide-react';
-import { syncClient, DEFAULT_CLOUD_SERVER_URL } from '../utils/syncClient';
+import React, { useState } from 'react';
+import { X, Tablet, Laptop, Check, Copy, Wifi, ArrowRightLeft, Cloud, ShieldCheck } from 'lucide-react';
 import { playTapSound } from '../utils/audio';
 
 interface MultiDeviceModalProps {
@@ -15,22 +14,10 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
   connectionStatus,
 }) => {
   const [copied, setCopied] = useState(false);
-  const [serverUrlInput, setServerUrlInput] = useState('');
-  const [isTesting, setIsTesting] = useState(false);
-  const [testResult, setTestResult] = useState<'exito' | 'error' | null>(null);
-
-  useEffect(() => {
-    if (isOpen) {
-      const current = syncClient.getServerBaseUrl();
-      setServerUrlInput(current || (typeof window !== 'undefined' && window.location.hostname.includes('github.io') ? DEFAULT_CLOUD_SERVER_URL : ''));
-      setTestResult(null);
-    }
-  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const currentUrl = typeof window !== 'undefined' ? window.location.href : '';
-  const isGitHubPages = typeof window !== 'undefined' && window.location.hostname.includes('github.io');
 
   const handleCopy = () => {
     playTapSound();
@@ -39,41 +26,10 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
     setTimeout(() => setCopied(false), 2500);
   };
 
-  const handleSaveServer = async () => {
-    playTapSound();
-    setIsTesting(true);
-    setTestResult(null);
-
-    const targetUrl = serverUrlInput.trim();
-    if (targetUrl) {
-      const ok = await syncClient.testServerConnection(targetUrl);
-      setIsTesting(false);
-      if (ok) {
-        setTestResult('exito');
-        syncClient.setServerBaseUrl(targetUrl);
-      } else {
-        setTestResult('error');
-        // Still save it if user wants to force
-        syncClient.setServerBaseUrl(targetUrl);
-      }
-    } else {
-      setIsTesting(false);
-      syncClient.setServerBaseUrl('');
-      setTestResult('exito');
-    }
-  };
-
-  const handleUseDefaultCloudServer = () => {
-    playTapSound();
-    setServerUrlInput(DEFAULT_CLOUD_SERVER_URL);
-    syncClient.setServerBaseUrl(DEFAULT_CLOUD_SERVER_URL);
-    setTestResult(null);
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
       <div
-        className="w-full max-w-xl max-h-[92vh] overflow-y-auto bg-white dark:bg-stone-900 rounded-3xl p-6 shadow-2xl border border-stone-200 dark:border-stone-800 text-stone-900 dark:text-stone-100 relative no-scrollbar"
+        className="w-full max-w-lg bg-white dark:bg-stone-900 rounded-3xl p-6 shadow-2xl border border-stone-200 dark:border-stone-800 text-stone-900 dark:text-stone-100 relative"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -90,8 +46,8 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
             <ArrowRightLeft className="w-6 h-6" />
           </div>
           <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h3 className="text-lg font-bold">Sincronización Multidispositivo</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-lg font-bold">Sincronización en la Nube</h3>
               <span
                 className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
                   connectionStatus === 'conectado'
@@ -114,23 +70,21 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
               </span>
             </div>
             <p className="text-xs text-stone-500 dark:text-stone-400">
-              Conecta meseros (tablet/celular) y baristas (computadora) en tiempo real
+              Conectado a Firebase Firestore en tiempo real para GitHub Pages
             </p>
           </div>
         </div>
 
-        {/* GitHub Pages Notice */}
-        {isGitHubPages && (
-          <div className="my-3 p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 space-y-1">
-            <div className="flex items-center gap-1.5 font-bold">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>Detectado: Alojamiento en GitHub Pages</span>
-            </div>
-            <p className="leading-relaxed text-[11px] text-amber-800 dark:text-amber-300">
-              GitHub Pages solo guarda archivos estáticos (HTML/JS) y no ejecuta código backend. Para que tus pedidos se sincronicen entre el celular del mesero y la laptop del barista, la app se conecta al servidor central en la nube.
-            </p>
+        {/* Cloud feature highlight */}
+        <div className="my-3 p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800 text-xs text-emerald-900 dark:text-emerald-200 space-y-1">
+          <div className="flex items-center gap-1.5 font-bold">
+            <Cloud className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>Base de Datos Global en la Nube Activa</span>
           </div>
-        )}
+          <p className="leading-relaxed text-[11px] text-emerald-800 dark:text-emerald-300">
+            Tu app ahora se comunica directamente con Google Cloud / Firebase Firestore. Esto permite que funcione perfectamente en GitHub Pages, teléfonos, tablets y computadoras sin depender de servidores locales.
+          </p>
+        </div>
 
         {/* Diagram */}
         <div className="my-4 p-4 rounded-2xl bg-stone-50 dark:bg-stone-850 border border-stone-200/80 dark:border-stone-800">
@@ -143,14 +97,14 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
 
             <div className="flex flex-col items-center justify-center">
               <div className="w-full flex items-center justify-center">
-                <div className="h-0.5 flex-1 bg-amber-400/60" />
-                <div className="w-7 h-7 rounded-full bg-amber-600 text-white flex items-center justify-center shadow-xs">
+                <div className="h-0.5 flex-1 bg-emerald-400/60" />
+                <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center shadow-xs">
                   <Wifi className="w-3.5 h-3.5" />
                 </div>
-                <div className="h-0.5 flex-1 bg-amber-400/60" />
+                <div className="h-0.5 flex-1 bg-emerald-400/60" />
               </div>
-              <span className="text-[10px] text-amber-700 dark:text-amber-400 font-semibold mt-1">
-                Tiempo Real
+              <span className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold mt-1">
+                Firestore Nube
               </span>
             </div>
 
@@ -162,59 +116,10 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
           </div>
         </div>
 
-        {/* Server URL Configuration */}
-        <div className="my-4 p-4 rounded-2xl bg-stone-50 dark:bg-stone-850 border border-stone-200/80 dark:border-stone-800 space-y-3">
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-bold text-stone-800 dark:text-stone-200 flex items-center gap-1.5">
-              <Server className="w-4 h-4 text-amber-600" />
-              <span>Servidor Central de Sincronización</span>
-            </label>
-            <button
-              type="button"
-              onClick={handleUseDefaultCloudServer}
-              className="text-[10px] text-amber-600 dark:text-amber-400 hover:underline font-semibold"
-            >
-              Restablecer Servidor Nube
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={serverUrlInput}
-              onChange={(e) => setServerUrlInput(e.target.value)}
-              placeholder="https://..."
-              className="flex-1 h-10 px-3 text-xs rounded-xl bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 font-mono text-stone-800 dark:text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500"
-            />
-            <button
-              type="button"
-              onClick={handleSaveServer}
-              disabled={isTesting}
-              className="min-h-[40px] px-3.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 transition active:scale-95 disabled:opacity-50 shrink-0"
-            >
-              {isTesting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-              <span>{isTesting ? 'Probando...' : 'Conectar'}</span>
-            </button>
-          </div>
-
-          {testResult === 'exito' && (
-            <p className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-              <Check className="w-3.5 h-3.5" />
-              <span>¡Conexión establecida exitosamente con el servidor central!</span>
-            </p>
-          )}
-
-          {testResult === 'error' && (
-            <p className="text-[11px] text-rose-600 dark:text-rose-400">
-              No se pudo conectar a esta URL. Verifica que el servidor esté activo o pulsa "Restablecer Servidor Nube".
-            </p>
-          )}
-        </div>
-
-        {/* Current URL to open on other devices */}
-        <div className="pt-2 border-t border-stone-200 dark:border-stone-800">
+        {/* Link to open on other devices */}
+        <div className="mt-4 pt-3 border-t border-stone-200 dark:border-stone-800">
           <label className="text-[11px] font-bold text-stone-700 dark:text-stone-300 block mb-1.5">
-            Enlace para abrir en tus otros dispositivos (tablet, celular o PC):
+            Enlace para abrir en tu tablet, celular o computadora:
           </label>
           <div className="flex items-center gap-2">
             <input
@@ -225,7 +130,7 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
             />
             <button
               onClick={handleCopy}
-              className="min-h-[40px] px-3.5 rounded-xl bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 text-xs font-bold flex items-center gap-1.5 active:scale-95 transition shrink-0"
+              className="min-h-[40px] px-3.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 active:scale-95 transition shrink-0"
             >
               {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
               <span>{copied ? 'Copiado' : 'Copiar'}</span>
@@ -235,9 +140,9 @@ export const MultiDeviceModal: React.FC<MultiDeviceModalProps> = ({
 
         <button
           onClick={onClose}
-          className="w-full mt-5 py-3 rounded-2xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs transition active:scale-98 shadow-sm"
+          className="w-full mt-5 py-3 rounded-2xl bg-stone-900 dark:bg-stone-100 hover:bg-stone-800 dark:hover:bg-white text-white dark:text-stone-900 font-bold text-xs transition"
         >
-          Cerrar
+          Entendido
         </button>
       </div>
     </div>

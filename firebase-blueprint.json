@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "Una comanda de café o producto tomada por el mesero y preparada por el barista.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNumber": { "type": "number" },
+        "customerName": { "type": "string" },
+        "type": { "type": "string", "enum": ["aqui", "llevar"] },
+        "tableNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["pendiente", "preparando", "listo", "entregado", "cancelado"] },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "tip": { "type": "number" },
+        "total": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["efectivo", "tarjeta", "transferencia"] },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "preparedAt": { "type": "number" },
+        "completedAt": { "type": "number" }
+      },
+      "required": ["orderNumber", "customerName", "type", "status", "items", "total", "createdAt"]
+    },
+    "MenuSettings": {
+      "title": "MenuSettings",
+      "description": "Configuración global de productos del menú y número de contador de comanda.",
+      "type": "object",
+      "properties": {
+        "products": { "type": "array" },
+        "counter": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      }
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Colección de pedidos en tiempo real compartidos entre todos los dispositivos del café."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/MenuSettings" },
+      "description": "Ajustes del menú y contador de tickets compartidos."
+    }
+  }
+}

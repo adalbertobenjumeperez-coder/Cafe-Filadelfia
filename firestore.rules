@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 64;
+    }
+
+    match /orders/{orderId} {
+      allow read: if isValidId(orderId);
+      allow create: if isValidId(orderId) 
+                    && request.resource.data.orderNumber is number
+                    && request.resource.data.customerName is string
+                    && request.resource.data.status is string
+                    && request.resource.data.items is list;
+      allow update: if isValidId(orderId)
+                    && request.resource.data.orderNumber is number
+                    && request.resource.data.status is string;
+      allow delete: if isValidId(orderId);
+    }
+
+    match /settings/{settingId} {
+      allow read: if isValidId(settingId);
+      allow write: if isValidId(settingId);
+    }
+
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+  }
+}

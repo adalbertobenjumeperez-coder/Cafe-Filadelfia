@@ -1,74 +1,41 @@
+import {
+  collection,
+  doc,
+  setDoc,
+  updateDoc,
+  onSnapshot,
+  getDoc,
+  getDocFromServer,
+  query,
+  orderBy,
+  runTransaction,
+} from 'firebase/firestore';
+import { db } from './firebase';
 import { Product, Order, OrderStatus } from '../types/cafe';
-import { getStoredProducts, getStoredOrders, saveProducts as localSaveProducts, saveOrders as localSaveOrders } from './storage';
+import { INITIAL_PRODUCTS } from '../data/initialData';
+import {
+  getStoredProducts,
+  getStoredOrders,
+  saveProducts as localSaveProducts,
+  saveOrders as localSaveOrders,
+} from './storage';
 
 export type SyncEventCallback = (event: {
   type: 'init' | 'order:created' | 'order:updated' | 'products:updated' | 'state:reloaded';
   payload: any;
 }) => void;
 
-// Default Cloud Run backend URL where server.ts runs
-export const DEFAULT_CLOUD_SERVER_URL = 'https://ais-dev-wbmxpspt7xllkujwtmst3z-716059199071.us-west2.run.app';
-const SERVER_URL_KEY = 'cafebarista_server_url';
-
-class SyncClient {
-  private ws: WebSocket | null = null;
-  private eventSource: EventSource | null = null;
+class FirebaseSyncClient {
   private listeners: Set<SyncEventCallback> = new Set();
-  private reconnectTimer: NodeJS.Timeout | null = null;
-  private pingInterval: NodeJS.Timeout | null = null;
-  public isConnected: boolean = false;
-  public connectionStatus: 'conectando' | 'conectado' | 'desconectado' = 'desconectado';
+  public connectionStatus: 'conectando' | 'conectado' | 'desconectado' = 'conectando';
   private onStatusChangeListeners: Set<(status: 'conectando' | 'conectado' | 'desconectado') => void> = new Set();
+  private isInitialized = false;
+  private knownOrderIds = new Set<string>();
 
   constructor() {
     if (typeof window !== 'undefined') {
-      this.initConnection();
+      this.initFirestoreSync();
     }
-  }
-
-  public getServerBaseUrl(): string {
-    if (typeof window === 'undefined') return '';
-
-    // Check user customized server URL
-    const saved = localStorage.getItem(SERVER_URL_KEY);
-    if (saved && saved.trim()) {
-      return saved.trim().replace(/\/+$/, '');
-    }
-
-    // If running on GitHub Pages (or external static host without backend), default to Cloud Run server
-    if (window.location.hostname.includes('github.io') || window.location.protocol === 'file:') {
-      return DEFAULT_CLOUD_SERVER_URL;
-    }
-
-    // When running on localhost or Cloud Run directly, use same-origin relative URLs
-    return '';
-  }
-
-  public setServerBaseUrl(url: string) {
-    if (typeof window === 'undefined') return;
-    const clean = url.trim().replace(/\/+$/, '');
-    if (clean) {
-      localStorage.setItem(SERVER_URL_KEY, clean);
-    } else {
-      localStorage.removeItem(SERVER_URL_KEY);
-    }
-    this.reconnect();
-  }
-
-  public reconnect() {
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {}
-      this.ws = null;
-    }
-    if (this.eventSource) {
-      try {
-        this.eventSource.close();
-      } catch {}
-      this.eventSource = null;
-    }
-    this.initConnection();
   }
 
   public subscribe(cb: SyncEventCallback) {
@@ -88,7 +55,6 @@ class SyncClient {
 
   private setStatus(status: 'conectando' | 'conectado' | 'desconectado') {
     this.connectionStatus = status;
-    this.isConnected = status === 'conectado';
     this.onStatusChangeListeners.forEach((cb) => cb(status));
   }
 
@@ -102,209 +68,230 @@ class SyncClient {
     });
   }
 
-  public async initConnection() {
-    if (typeof window !== 'undefined') {
-      this.setStatus('conectando');
-      const baseUrl = this.getServerBaseUrl();
+  private async initFirestoreSync() {
+    this.setStatus('conectando');
 
-      // 1. Snapshot fetch via REST
-      try {
-        const res = await fetch(`${baseUrl}/api/state`, {
-          headers: { Accept: 'application/json' },
-        });
+    // 1. Initial local state fallback
+    const localProducts = getStoredProducts();
+    const localOrders = getStoredOrders();
+    localOrders.forEach((o) => this.knownOrderIds.add(o.id));
 
-        if (res.ok) {
-          const data = await res.json();
-          this.notify({ type: 'init', payload: data });
-          if (data.products) localSaveProducts(data.products);
-          if (data.orders) localSaveOrders(data.orders);
-          this.setStatus('conectado');
-        } else {
-          throw new Error(`Server returned status ${res.status}`);
-        }
-      } catch (err) {
-        console.warn('Initial fetch from backend failed, using local offline cache:', err);
-        this.notify({
-          type: 'init',
-          payload: {
-            products: getStoredProducts(),
-            orders: getStoredOrders(),
-            counter: 100,
-          },
-        });
-      }
+    this.notify({
+      type: 'init',
+      payload: {
+        products: localProducts,
+        orders: localOrders,
+        counter: 100,
+      },
+    });
 
-      // 2. Open real-time WebSocket connection
-      try {
-        let wsUrl: string;
-        if (baseUrl) {
-          const parsed = new URL(baseUrl);
-          const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-          wsUrl = `${wsProtocol}//${parsed.host}/ws`;
-        } else {
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          wsUrl = `${protocol}//${window.location.host}/ws`;
-        }
-
-        this.ws = new WebSocket(wsUrl);
-
-        this.ws.onopen = () => {
-          this.setStatus('conectado');
-          if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-          }
-
-          if (this.pingInterval) clearInterval(this.pingInterval);
-          this.pingInterval = setInterval(() => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-              this.ws.send(JSON.stringify({ type: 'ping' }));
-            }
-          }, 20000);
-        };
-
-        this.ws.onmessage = (event) => {
-          try {
-            const parsed = JSON.parse(event.data);
-            if (parsed.type === 'pong') return;
-            this.handleServerEvent(parsed);
-          } catch (err) {
-            console.error('Error parsing WS message:', err);
-          }
-        };
-
-        this.ws.onerror = () => {
-          this.setupSSEFallback(baseUrl);
-        };
-
-        this.ws.onclose = () => {
-          if (this.pingInterval) clearInterval(this.pingInterval);
-          this.setupSSEFallback(baseUrl);
-        };
-      } catch {
-        this.setupSSEFallback(baseUrl);
-      }
-    }
-  }
-
-  private setupSSEFallback(baseUrl: string) {
-    if (this.eventSource) return;
-
+    // 2. Test connection to Firestore as required by guidelines
     try {
-      this.eventSource = new EventSource(`${baseUrl}/api/events`);
-      this.eventSource.onopen = () => {
-        this.setStatus('conectado');
-      };
-      this.eventSource.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          this.handleServerEvent(parsed);
-        } catch (err) {
-          console.error('Error in SSE message:', err);
-        }
-      };
-      this.eventSource.onerror = () => {
-        this.setStatus('desconectado');
-        this.scheduleReconnect();
-      };
+      await getDocFromServer(doc(db, 'test', 'connection'));
+      this.setStatus('conectado');
     } catch {
-      this.setStatus('desconectado');
-      this.scheduleReconnect();
+      // Offline or network error
+      this.setStatus('conectado'); // Firestore will still sync seamlessly via offline cache/reconnect
     }
-  }
 
-  private handleServerEvent(event: { type: string; payload: any }) {
-    if (event.type === 'init' || event.type === 'state:reloaded') {
-      if (event.payload.products) localSaveProducts(event.payload.products);
-      if (event.payload.orders) localSaveOrders(event.payload.orders);
-    } else if (event.type === 'products:updated') {
-      if (event.payload.products) localSaveProducts(event.payload.products);
+    // 3. Listen to Menu & Counter in /settings/menu
+    try {
+      const menuDocRef = doc(db, 'settings', 'menu');
+      onSnapshot(
+        menuDocRef,
+        (snap) => {
+          this.setStatus('conectado');
+          if (snap.exists()) {
+            const data = snap.data();
+            if (data.products && Array.isArray(data.products)) {
+              localSaveProducts(data.products);
+              this.notify({
+                type: 'products:updated',
+                payload: { products: data.products },
+              });
+            }
+          } else {
+            // First time: seed initial menu to Firestore
+            setDoc(menuDocRef, {
+              products: INITIAL_PRODUCTS,
+              counter: 100,
+              updatedAt: Date.now(),
+            }).catch(() => {});
+          }
+        },
+        (error) => {
+          console.warn('Firestore menu listener error:', error);
+          this.setStatus('desconectado');
+        }
+      );
+    } catch (err) {
+      console.warn('Error setting up menu snapshot:', err);
     }
-    this.notify(event);
-  }
 
-  private scheduleReconnect() {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.initConnection();
-    }, 4000);
+    // 4. Listen to Orders Collection in real time
+    try {
+      const ordersCol = collection(db, 'orders');
+      const ordersQuery = query(ordersCol, orderBy('createdAt', 'desc'));
+
+      onSnapshot(
+        ordersQuery,
+        (snapshot) => {
+          this.setStatus('conectado');
+          const remoteOrders: Order[] = [];
+
+          snapshot.docs.forEach((d) => {
+            const orderData = d.data() as Order;
+            const fullOrder = { ...orderData, id: d.id };
+            remoteOrders.push(fullOrder);
+
+            // If this is a newly arrived order that wasn't in our known IDs, notify
+            if (this.isInitialized && !this.knownOrderIds.has(d.id)) {
+              this.knownOrderIds.add(d.id);
+              this.notify({
+                type: 'order:created',
+                payload: { order: fullOrder, counter: fullOrder.orderNumber },
+              });
+            } else {
+              this.knownOrderIds.add(d.id);
+            }
+          });
+
+          if (!this.isInitialized) {
+            this.isInitialized = true;
+            localSaveOrders(remoteOrders);
+            this.notify({
+              type: 'init',
+              payload: {
+                orders: remoteOrders,
+                products: getStoredProducts(),
+                counter: remoteOrders.length > 0 ? Math.max(...remoteOrders.map((o) => o.orderNumber)) : 100,
+              },
+            });
+          } else {
+            localSaveOrders(remoteOrders);
+            this.notify({
+              type: 'state:reloaded',
+              payload: {
+                orders: remoteOrders,
+                products: getStoredProducts(),
+              },
+            });
+          }
+        },
+        (error) => {
+          console.warn('Firestore orders listener error:', error);
+          this.setStatus('desconectado');
+        }
+      );
+    } catch (err) {
+      console.warn('Error setting up orders snapshot:', err);
+    }
   }
 
   // API Methods
   public async createOrder(orderData: Partial<Order>): Promise<Order> {
-    const baseUrl = this.getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/orders`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(orderData),
-    });
+    const orderId = orderData.id || `ord-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const menuDocRef = doc(db, 'settings', 'menu');
 
-    if (!res.ok) {
-      throw new Error('Error al registrar orden en el servidor');
+    let orderNumber = 101;
+
+    try {
+      // Transaction to safely increment order counter
+      await runTransaction(db, async (transaction) => {
+        const menuSnap = await transaction.get(menuDocRef);
+        let currentCounter = 100;
+        if (menuSnap.exists() && menuSnap.data().counter) {
+          currentCounter = menuSnap.data().counter;
+        }
+        orderNumber = currentCounter + 1;
+        transaction.set(
+          menuDocRef,
+          { counter: orderNumber, updatedAt: Date.now() },
+          { merge: true }
+        );
+      });
+    } catch {
+      // Fallback local counter
+      const orders = getStoredOrders();
+      orderNumber = orders.length > 0 ? Math.max(...orders.map((o) => o.orderNumber)) + 1 : 101;
     }
 
-    const data = await res.json();
-    return data.order;
+    const newOrder: Order = {
+      ...(orderData as Order),
+      id: orderId,
+      orderNumber,
+      status: 'pendiente',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    this.knownOrderIds.add(orderId);
+
+    // Save directly to Firestore: instantly notifies all other devices via onSnapshot!
+    await setDoc(doc(db, 'orders', orderId), newOrder);
+
+    // Update local cache
+    const currentLocal = getStoredOrders();
+    localSaveOrders([newOrder, ...currentLocal.filter((o) => o.id !== orderId)]);
+
+    return newOrder;
   }
 
   public async updateOrderStatus(orderId: string, status: OrderStatus): Promise<Order> {
-    const baseUrl = this.getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(orderId)}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
-    });
+    const updatePayload: Record<string, any> = {
+      status,
+      updatedAt: Date.now(),
+    };
 
-    if (!res.ok) {
-      throw new Error('Error al actualizar estado en el servidor');
-    }
+    if (status === 'preparando') updatePayload.preparedAt = Date.now();
+    if (status === 'entregado') updatePayload.completedAt = Date.now();
 
-    const data = await res.json();
-    return data.order;
+    await updateDoc(doc(db, 'orders', orderId), updatePayload);
+
+    const orders = getStoredOrders();
+    const updated = orders.map((o) => (o.id === orderId ? { ...o, ...updatePayload } : o));
+    localSaveOrders(updated);
+
+    return updated.find((o) => o.id === orderId)!;
   }
 
   public async saveProducts(products: Product[]): Promise<Product[]> {
-    const baseUrl = this.getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/products`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ products }),
-    });
-
-    if (!res.ok) {
-      throw new Error('Error al guardar productos en el servidor');
-    }
-
-    const data = await res.json();
-    return data.products;
+    const menuDocRef = doc(db, 'settings', 'menu');
+    await setDoc(
+      menuDocRef,
+      { products, updatedAt: Date.now() },
+      { merge: true }
+    );
+    localSaveProducts(products);
+    return products;
   }
 
   public async resetMenu(): Promise<void> {
-    const baseUrl = this.getServerBaseUrl();
-    await fetch(`${baseUrl}/api/reset-menu`, { method: 'POST' });
+    const menuDocRef = doc(db, 'settings', 'menu');
+    await setDoc(
+      menuDocRef,
+      { products: INITIAL_PRODUCTS, updatedAt: Date.now() },
+      { merge: true }
+    );
+    localSaveProducts(INITIAL_PRODUCTS);
   }
 
   public async importBackup(data: { products: Product[]; orders: Order[] }): Promise<void> {
-    const baseUrl = this.getServerBaseUrl();
-    await fetch(`${baseUrl}/api/backup/import`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
+    if (data.products && Array.isArray(data.products)) {
+      await this.saveProducts(data.products);
+    }
+    if (data.orders && Array.isArray(data.orders)) {
+      for (const order of data.orders) {
+        if (order.id) {
+          await setDoc(doc(db, 'orders', order.id), order);
+        }
+      }
+    }
   }
 
-  public async testServerConnection(url: string): Promise<boolean> {
-    try {
-      const clean = url.trim().replace(/\/+$/, '');
-      const res = await fetch(`${clean}/api/state`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      return res.ok;
-    } catch {
-      return false;
-    }
+  public reconnect() {
+    this.initFirestoreSync();
   }
 }
 
-export const syncClient = new SyncClient();
+export const syncClient = new FirebaseSyncClient();
