@@ -194,6 +194,11 @@ export default function App() {
     try {
       // Send to server: automatically broadcasts to Barista PC/tablets!
       const created = await syncClient.createOrder(payload);
+      setOrders((prev) => {
+        if (prev.some((o) => o.id === created.id)) return prev;
+        return [created, ...prev];
+      });
+      setNextOrderNum(created.orderNumber + 1);
       showToast(`Comanda #${created.orderNumber} enviada a Barra en vivo ☕`);
     } catch (err) {
       console.error('Failed to create order on server:', err);
