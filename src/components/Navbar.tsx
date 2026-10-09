@@ -1,6 +1,6 @@
 import React from 'react';
 import { ActiveTab } from '../types/cafe';
-import { Coffee, ClipboardList, Settings, TrendingUp, Smartphone, ShoppingBag } from 'lucide-react';
+import { Coffee, ClipboardList, Settings, TrendingUp, Smartphone, ShoppingBag, Wifi, ArrowRightLeft } from 'lucide-react';
 import { playTapSound } from '../utils/audio';
 
 interface NavbarProps {
@@ -9,8 +9,10 @@ interface NavbarProps {
   pendingOrdersCount: number;
   cartItemsCount: number;
   cartTotal: number;
+  connectionStatus: 'conectando' | 'conectado' | 'desconectado';
   onOpenCartMobile: () => void;
   onOpenInstallGuide: () => void;
+  onOpenMultiDeviceModal: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -19,8 +21,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   pendingOrdersCount,
   cartItemsCount,
   cartTotal,
+  connectionStatus,
   onOpenCartMobile,
   onOpenInstallGuide,
+  onOpenMultiDeviceModal,
 }) => {
   const handleNav = (tab: ActiveTab) => {
     playTapSound();
@@ -30,15 +34,37 @@ export const Navbar: React.FC<NavbarProps> = ({
   return (
     <header className="sticky top-0 z-30 bg-stone-900/95 text-stone-100 backdrop-blur-md border-b border-stone-800">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2">
-        {/* Zone 1: Brand title */}
+        {/* Zone 1: Brand title & live status indicator */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-600 to-amber-800 flex items-center justify-center text-white shadow-inner">
             <Coffee className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="font-semibold text-base sm:text-lg tracking-tight leading-none text-stone-100">
-              CaféBarista
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="font-semibold text-base sm:text-lg tracking-tight leading-none text-stone-100">
+                CaféBarista
+              </h1>
+              {/* Multi-device sync badge */}
+              <button
+                type="button"
+                onClick={onOpenMultiDeviceModal}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-stone-800/90 hover:bg-stone-750 border border-stone-700/60 text-[10px] font-medium transition cursor-pointer"
+                title="Sincronización multidispositivo en tiempo real (Clic para detalles)"
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    connectionStatus === 'conectado'
+                      ? 'bg-emerald-400 animate-pulse'
+                      : connectionStatus === 'conectando'
+                      ? 'bg-amber-400 animate-ping'
+                      : 'bg-rose-400'
+                  }`}
+                />
+                <span className="text-stone-300 hidden sm:inline">
+                  {connectionStatus === 'conectado' ? 'En Vivo' : connectionStatus}
+                </span>
+              </button>
+            </div>
             <p className="text-[11px] text-stone-400 font-medium tracking-wide">Punto de Venta iOS</p>
           </div>
         </div>
@@ -117,6 +143,16 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
           )}
+
+          {/* Multi-device sync button */}
+          <button
+            onClick={onOpenMultiDeviceModal}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-200 text-xs font-medium border border-stone-700 transition active:scale-95"
+            title="Conectar mesero y barista en dispositivos separados"
+          >
+            <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">Dispositivos</span>
+          </button>
 
           {/* iOS Install Guide Trigger */}
           <button

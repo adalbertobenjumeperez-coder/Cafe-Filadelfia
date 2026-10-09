@@ -2,14 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { Product, Order, OrderItem, ActiveTab, OrderStatus } from './types/cafe';
 import {
   getStoredProducts,
-  saveProducts,
   getStoredOrders,
-  saveOrders,
-  getNextOrderNumber,
-  resetToDefaultMenu,
   exportBackupData,
-  importBackupData,
 } from './utils/storage';
+import { syncClient } from './utils/syncClient';
 import { Navbar } from './components/Navbar';
 import { ProductCard } from './components/ProductCard';
 import { CustomizationModal } from './components/CustomizationModal';
@@ -18,9 +14,10 @@ import { BaristaKDS } from './components/BaristaKDS';
 import { MenuManager } from './components/MenuManager';
 import { SalesAnalytics } from './components/SalesAnalytics';
 import { IOSInstallGuide } from './components/IOSInstallGuide';
+import { MultiDeviceModal } from './components/MultiDeviceModal';
 import { ReceiptModal } from './components/ReceiptModal';
-import { Search, Sparkles, Coffee, AlertCircle } from 'lucide-react';
-import { playTapSound, playOrderSentSound } from './utils/audio';
+import { Search, Sparkles, Coffee } from 'lucide-react';
+import { playTapSound, playOrderSentSound, playOrderReadySound } from './utils/audio';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('pos');
@@ -31,41 +28,65 @@ export default function App() {
   const [isCustomizeOpen, setIsCustomizeOpen] = useState<boolean>(false);
   const [isCartMobileOpen, setIsCartMobileOpen] = useState<boolean>(false);
   const [isInstallGuideOpen, setIsInstallGuideOpen] = useState<boolean>(false);
+  const [isMultiDeviceModalOpen, setIsMultiDeviceModalOpen] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<'conectando' | 'conectado' | 'desconectado'>('conectando');
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('Todos');
   const [nextOrderNum, setNextOrderNum] = useState<number>(101);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Initialize data from persistent localStorage
+  // Initialize data and real-time subscription
   useEffect(() => {
-    const loadedProducts = getStoredProducts();
-    const loadedOrders = getStoredOrders();
-    setProducts(loadedProducts);
-    setOrders(loadedOrders);
+    // 1. Initial local fallback
+    setProducts(getStoredProducts());
+    setOrders(getStoredOrders());
 
-    // Pick reasonable next order number
-    if (loadedOrders.length > 0) {
-      const maxNum = Math.max(...loadedOrders.map((o) => o.orderNumber));
-      setNextOrderNum(maxNum + 1);
-    }
+    // 2. Subscribe to connection status
+    const unsubStatus = syncClient.onStatusChange((status) => {
+      setConnectionStatus(status);
+    });
 
-    // Listen for storage updates across tabs if any
-    const handleProductsUpdate = () => setProducts(getStoredProducts());
-    const handleOrdersUpdate = () => setOrders(getStoredOrders());
-
-    window.addEventListener('cafebarista_products_updated', handleProductsUpdate);
-    window.addEventListener('cafebarista_orders_updated', handleOrdersUpdate);
+    // 3. Subscribe to real-time events from server (all devices)
+    const unsubEvents = syncClient.subscribe((event) => {
+      if (event.type === 'init' || event.type === 'state:reloaded') {
+        if (event.payload.products) setProducts(event.payload.products);
+        if (event.payload.orders) setOrders(event.payload.orders);
+        if (event.payload.counter) setNextOrderNum(event.payload.counter + 1);
+      } else if (event.type === 'order:created') {
+        const newOrder = event.payload.order;
+        setOrders((prev) => {
+          // Idempotency: avoid duplicates
+          if (prev.some((o) => o.id === newOrder.id)) return prev;
+          return [newOrder, ...prev];
+        });
+        if (event.payload.counter) {
+          setNextOrderNum(event.payload.counter + 1);
+        }
+        playOrderSentSound();
+        showToast(`🔔 ¡Nueva comanda #${newOrder.orderNumber} recibida! (${newOrder.customerName})`);
+      } else if (event.type === 'order:updated') {
+        const updated = event.payload.order;
+        setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+        if (updated.status === 'listo') {
+          playOrderReadySound();
+          showToast(`✅ Pedido #${updated.orderNumber} listo para entrega`);
+        }
+      } else if (event.type === 'products:updated') {
+        setProducts(event.payload.products);
+        showToast('Menú sincronizado');
+      }
+    });
 
     return () => {
-      window.removeEventListener('cafebarista_products_updated', handleProductsUpdate);
-      window.removeEventListener('cafebarista_orders_updated', handleOrdersUpdate);
+      unsubStatus();
+      unsubEvents();
     };
   }, []);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setTimeout(() => setToastMessage(null), 3500);
   };
 
   // Cart operations
@@ -75,7 +96,6 @@ export default function App() {
   };
 
   const handleQuickAdd = (product: Product) => {
-    // Generate default selections for required groups
     const selectedOptions = (product.optionGroups || []).flatMap((group) => {
       const defChoice = group.choices.find((c) => c.isDefault) || group.choices[0];
       if (group.required && defChoice) {
@@ -142,10 +162,10 @@ export default function App() {
     setCartItems([]);
   };
 
-  // Submit complete order from cart to Barista kitchen
-  const handleSubmitOrder = (orderData: {
+  // Submit complete order from cart to Barista kitchen (Syncs cross-device!)
+  const handleSubmitOrder = async (orderData: {
     customerName: string;
-    type: 'aqui' | 'llecar' | 'llevar';
+    type: 'aqui' | 'llevar';
     tableNumber?: string;
     paymentMethod: 'efectivo' | 'tarjeta' | 'transferencia';
     tip: number;
@@ -153,14 +173,10 @@ export default function App() {
   }) => {
     const subtotal = cartItems.reduce((acc, it) => acc + it.totalPrice, 0);
     const total = subtotal + orderData.tip;
-    const orderNumber = getNextOrderNumber();
-    setNextOrderNum(orderNumber + 1);
 
-    const newOrder: Order = {
-      id: `ord-${Date.now()}`,
-      orderNumber,
+    const payload: Partial<Order> = {
       customerName: orderData.customerName,
-      type: orderData.type as 'aqui' | 'llevar',
+      type: orderData.type,
       tableNumber: orderData.tableNumber,
       status: 'pendiente',
       items: [...cartItems],
@@ -169,49 +185,73 @@ export default function App() {
       total,
       paymentMethod: orderData.paymentMethod,
       notes: orderData.notes,
-      createdAt: Date.now(),
     };
 
-    const updatedOrders = [newOrder, ...orders];
-    setOrders(updatedOrders);
-    saveOrders(updatedOrders);
+    // Clean current cart immediately
     setCartItems([]);
     setIsCartMobileOpen(false);
 
-    showToast(`Comanda #${newOrder.orderNumber} enviada a Barista ☕`);
-  };
-
-  // Order status update from Barista KDS
-  const handleUpdateOrderStatus = (orderId: string, newStatus: OrderStatus) => {
-    const updated = orders.map((o) => {
-      if (o.id === orderId) {
-        const timestampUpdate: Partial<Order> = { status: newStatus, updatedAt: Date.now() };
-        if (newStatus === 'preparando') timestampUpdate.preparedAt = Date.now();
-        if (newStatus === 'entregado') timestampUpdate.completedAt = Date.now();
-        return { ...o, ...timestampUpdate };
-      }
-      return o;
-    });
-
-    setOrders(updated);
-    saveOrders(updated);
-
-    if (newStatus === 'listo') {
-      showToast(`¡Pedido #${orders.find((o) => o.id === orderId)?.orderNumber} listo para entregar! 🔔`);
+    try {
+      // Send to server: automatically broadcasts to Barista PC/tablets!
+      const created = await syncClient.createOrder(payload);
+      showToast(`Comanda #${created.orderNumber} enviada a Barra en vivo ☕`);
+    } catch (err) {
+      console.error('Failed to create order on server:', err);
+      // Offline fallback: save locally
+      const offlineOrder: Order = {
+        id: `ord-${Date.now()}`,
+        orderNumber: nextOrderNum,
+        customerName: orderData.customerName,
+        type: orderData.type,
+        tableNumber: orderData.tableNumber,
+        status: 'pendiente',
+        items: [...cartItems],
+        subtotal,
+        tip: orderData.tip,
+        total,
+        paymentMethod: orderData.paymentMethod,
+        notes: orderData.notes,
+        createdAt: Date.now(),
+      };
+      setOrders((prev) => [offlineOrder, ...prev]);
+      setNextOrderNum((n) => n + 1);
+      showToast(`Comanda #${offlineOrder.orderNumber} guardada en modo local`);
     }
   };
 
-  // Menu manager actions
-  const handleSaveProducts = (updatedProducts: Product[]) => {
-    setProducts(updatedProducts);
-    saveProducts(updatedProducts);
-    showToast('Menú y opciones actualizados correctamente');
+  // Order status update from Barista KDS (Syncs cross-device!)
+  const handleUpdateOrderStatus = async (orderId: string, newStatus: OrderStatus) => {
+    // Optimistic update
+    setOrders((prev) =>
+      prev.map((o) => (o.id === orderId ? { ...o, status: newStatus, updatedAt: Date.now() } : o))
+    );
+
+    try {
+      await syncClient.updateOrderStatus(orderId, newStatus);
+    } catch (err) {
+      console.error('Failed to update status on server:', err);
+    }
   };
 
-  const handleResetDefaults = () => {
-    const initial = resetToDefaultMenu();
-    setProducts(initial);
-    showToast('Menú restablecido a valores iniciales');
+  // Menu manager actions (Syncs cross-device!)
+  const handleSaveProducts = async (updatedProducts: Product[]) => {
+    setProducts(updatedProducts);
+    try {
+      await syncClient.saveProducts(updatedProducts);
+      showToast('Menú y opciones actualizados en todos los dispositivos');
+    } catch (err) {
+      console.error('Failed to save products:', err);
+      showToast('Guardado localmente');
+    }
+  };
+
+  const handleResetDefaults = async () => {
+    try {
+      await syncClient.resetMenu();
+      showToast('Menú restablecido');
+    } catch {
+      showToast('Error al restablecer');
+    }
   };
 
   const handleExportData = () => {
@@ -226,16 +266,16 @@ export default function App() {
     showToast('Copia de respaldo exportada');
   };
 
-  const handleImportData = (jsonStr: string) => {
-    const ok = importBackupData(jsonStr);
-    if (ok) {
-      setProducts(getStoredProducts());
-      setOrders(getStoredOrders());
-      showToast('Datos importados con éxito');
+  const handleImportData = async (jsonStr: string) => {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      await syncClient.importBackup(parsed);
+      showToast('Datos importados y sincronizados');
       return true;
+    } catch {
+      alert('Error al leer el archivo de respaldo');
+      return false;
     }
-    alert('Error al leer el archivo de respaldo');
-    return false;
   };
 
   // Categories list
@@ -263,8 +303,10 @@ export default function App() {
         pendingOrdersCount={pendingOrdersCount}
         cartItemsCount={cartItems.reduce((sum, i) => sum + i.quantity, 0)}
         cartTotal={cartTotal}
+        connectionStatus={connectionStatus}
         onOpenCartMobile={() => setIsCartMobileOpen(true)}
         onOpenInstallGuide={() => setIsInstallGuideOpen(true)}
+        onOpenMultiDeviceModal={() => setIsMultiDeviceModalOpen(true)}
       />
 
       {/* Floating Toast Notification */}
@@ -419,6 +461,13 @@ export default function App() {
       <IOSInstallGuide
         isOpen={isInstallGuideOpen}
         onClose={() => setIsInstallGuideOpen(false)}
+      />
+
+      {/* Multi-Device Sync Guide & Sharing Modal */}
+      <MultiDeviceModal
+        isOpen={isMultiDeviceModalOpen}
+        onClose={() => setIsMultiDeviceModalOpen(false)}
+        connectionStatus={connectionStatus}
       />
 
       {/* Digital Receipt Modal */}

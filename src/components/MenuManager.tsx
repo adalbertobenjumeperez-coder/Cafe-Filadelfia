@@ -9,7 +9,7 @@ interface MenuManagerProps {
   onSaveProducts: (products: Product[]) => void;
   onResetDefaults: () => void;
   onExportData: () => void;
-  onImportData: (json: string) => boolean;
+  onImportData: (json: string) => boolean | Promise<boolean>;
 }
 
 export const MenuManager: React.FC<MenuManagerProps> = ({
